@@ -28,30 +28,12 @@ sops - https://github.com/mozilla/sops
 Available Commands:
   enc    	Encrypt secrets file
   dec    	Decrypt secrets file
-  clean         Clean all Decrypted files in specified directory
   view   	Print secrets decrypted
   edit   	Edit secrets file and encrypt afterwards
+  clean         Clean all Decrypted files in specified directory
   install	wrapper that decrypts secrets[.*].yaml files before running helm install
   upgrade	wrapper that decrypts secrets[.*].yaml files before running helm upgrade
   lint		wrapper that decrypts secrets[.*].yaml files before running helm lint
-
-EOF
-}
-
-edit_usage() {
-    cat <<EOF
-Edit encrypted secrets
-
-Decrypt encrypted file, edit and then encrypt
-
-You can use plain sops to edit - https://github.com/mozilla/sops
-
-Example:
-  $ helm secrets edit <SECRET_FILE_PATH>
-  or $ sops <SECRET_FILE_PATH>
-  $ git add <SECRET_FILE_PATH>
-  $ git commit
-  $ git push
 
 EOF
 }
@@ -94,19 +76,6 @@ Typical usage:
 EOF
 }
 
-clean_usage() {
-    cat <<EOF
-Clean all decrypted files if any exist
-
-It removes all decrypted .dec.yaml files in the specified directory
-(recursively) if they exist.
-
-Example:
-  $ helm secrets clean <dir with secrets>
-
-EOF
-}
-
 view_usage() {
     cat <<EOF
 View specified secrets[.*].yaml file
@@ -116,6 +85,37 @@ Example:
 
 Typical usage:
   $ helm secrets view secrets/myproject/nginx/secrets.yaml | grep basic_auth
+
+EOF
+}
+
+edit_usage() {
+    cat <<EOF
+Edit encrypted secrets
+
+Decrypt encrypted file, edit and then encrypt
+
+You can use plain sops to edit - https://github.com/mozilla/sops
+
+Example:
+  $ helm secrets edit <SECRET_FILE_PATH>
+  or $ sops <SECRET_FILE_PATH>
+  $ git add <SECRET_FILE_PATH>
+  $ git commit
+  $ git push
+
+EOF
+}
+
+clean_usage() {
+    cat <<EOF
+Clean all decrypted files if any exist
+
+It removes all decrypted .dec.yaml files in the specified directory
+(recursively) if they exist.
+
+Example:
+  $ helm secrets clean <dir with secrets>
 
 EOF
 }
@@ -267,17 +267,6 @@ dec() {
     fi
 }
 
-clean() {
-    if is_help "$1"
-    then
-	clean_usage
-	return
-    fi
-    local basedir="$1"
-    sops_config
-    find "$basedir" -type f -name "*${DEC_SUFFIX}" -print0 | xargs -r0 rm -v
-}
-
 view_helper() {
     local yml="$1"
     [[ -e "$yml" ]] || { echo "File does not exist: $yml"; exit 1; }
@@ -305,6 +294,17 @@ edit_helper() {
 edit() {
     local yml="$1"
     edit_helper "$yml"
+}
+
+clean() {
+    if is_help "$1"
+    then
+	clean_usage
+	return
+    fi
+    local basedir="$1"
+    sops_config
+    find "$basedir" -type f -name "*${DEC_SUFFIX}" -print0 | xargs -r0 rm -v
 }
 
 helm_wrapper() {
@@ -395,18 +395,12 @@ helm_command() {
     helm_wrapper "$@"
 }
 
-if [[ $# -eq 0 ]]
-then
-    usage
-    exit 1
-fi
-
 case "${1:-help}" in
     enc)
 	if [[ $# -lt 2 ]]
 	then
 	    enc_usage
-	    echo "Error: Chart package required."
+	    echo "Error: secrets file required."
 	    exit 1
 	fi
 	enc "$2"
@@ -416,10 +410,29 @@ case "${1:-help}" in
 	if [[ $# -lt 2 ]]
 	then
 	    dec_usage
-	    echo "Error: Chart package required."
+	    echo "Error: secrets file required."
 	    exit 1
 	fi
 	dec "$2"
+	;;
+    view)
+	if [[ $# -lt 2 ]]
+	then
+	    view_usage
+	    echo "Error: secrets file required."
+	    exit 1
+	fi
+	view "$2"
+	;;
+    edit)
+	if [[ $# -lt 2 ]]
+	then
+	    edit_usage
+	    echo "Error: secrets file required."
+	    exit 1
+	fi
+	edit "$2"
+	shift
 	;;
     clean)
 	if [[ $# -lt 2 ]]
@@ -429,25 +442,6 @@ case "${1:-help}" in
 	    exit 1
 	fi
 	clean "$2"
-	;;
-    view)
-	if [[ $# -lt 2 ]]
-	then
-	    view_usage
-	    echo "Error: Chart package required."
-	    exit 1
-	fi
-	view "$2"
-	;;
-    edit)
-	if [[ $# -lt 2 ]]
-	then
-	    edit_usage
-	    echo "Error: Chart package required."
-	    exit 1
-	fi
-	edit "$2"
-	shift
 	;;
     install|upgrade|lint)
 	helm_command "$@"
