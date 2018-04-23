@@ -155,7 +155,7 @@ EOF
 
 is_help() {
     case "$1" in
-	"-h"|"--help"|"help")
+	-h|--help|help)
 	    return 0
 	    ;;
 	*)
@@ -174,13 +174,10 @@ encrypt_helper() {
     local dir=$(dirname "$1")
     local yml=$(basename "$1")
     cd "$dir"
-    [[ -e "$yml" ]] || (echo "File does not exist: $dir/$yml" && exit 1)
+    [[ -e "$yml" ]] || { echo "File does not exist: $dir/$yml"; exit 1; }
     sops_config
     local ymldec=$(sed -e "s/\\.yaml$/${DEC_SUFFIX}/" <<<"$yml")
-    if [[ ! -e $ymldec ]]
-    then
-	ymldec="$yml"
-    fi
+    [[ -e $ymldec ]] || ymldec="$yml"
     
     if [[ $(grep -C10000 'sops:' "$ymldec" | grep -c 'version:') -gt 0 ]]
     then
@@ -214,8 +211,11 @@ enc() {
 }
 
 decrypt_helper() {
-    local yml="$1" __ymldec __decrypted=0
-    [[ -e "$yml" ]] || (echo "File does not exist: $yml" && exit 1)
+    local yml="$1" _ymldec _dec
+    [[ $# -ge 2 ]] && declare -n __ymldec=$2
+    [[ $# -ge 3 ]] && declare -n __dec=$3
+    __dec=0
+    [[ -e "$yml" ]] || { echo "File does not exist: $yml"; exit 1; }
     if [[ $(grep -C10000 'sops:' "$yml" | grep -c 'version:') -eq 0 ]]
     then
 	echo "Not encrypted: $yml"
@@ -228,18 +228,8 @@ decrypt_helper() {
 	    echo "$__ymldec is newer than $yml"
 	else
 	    sops -d "$yml" > "$__ymldec"
-	    __decrypted=1
+	    __dec=1
 	fi
-    fi
-    # if a return variable was specified, return decrypted file
-    if [[ $# -ge 2 ]]
-    then
-	eval $2="'$__ymldec'"
-    fi
-    # if a return variable was specified, return if the file was decrypted on-the-fly
-    if [[ $# -ge 3 ]]
-    then
-	eval $3="'$__decrypted'"
     fi
 }
 
@@ -272,7 +262,7 @@ clean() {
 
 view_helper() {
     local yml="$1"
-    [[ -e "$yml" ]] || (echo "File does not exist: $yml" && exit 1)
+    [[ -e "$yml" ]] || { echo "File does not exist: $yml"; exit 1; }
     sops_config
     sops -d "$yml"
 }
@@ -289,7 +279,7 @@ view() {
 
 edit_helper() {
     local yml="$1"
-    [[ -e "$yml" ]] || (echo "File does not exist: $yml" && exit 1)
+    [[ -e "$yml" ]] || { echo "File does not exist: $yml"; exit 1; }
     sops_config
     exec sops "$yml" < /dev/tty
 }
@@ -299,15 +289,39 @@ edit() {
     edit_helper "$yml"
 }
 
-install_wrapper() {
-    if is_help "$1"
+helm_wrapper() {
+    local cmd="$1"
+    shift
+
+    # cache options for the helm command in a file so we don't need to parse the help each time
+    local helm_version=$(helm version --client --short)
+    local optfile="$HELM_PLUGIN_DIR/helm.${cmd}.options" options_version='' options='' longoptions=''
+    [[ -f $optfile ]] && . "$optfile"
+
+    if [[ $helm_version != $options_version ]]
     then
-	install_usage
-	return
+	local re='(-([a-zA-Z0-9]), )?--([-_a-zA-Z0-9]+)( ([a-zA-Z0-9]+))?' line
+	options='' longoptions=''
+
+	# parse the helm options and option args from the help output
+	while read line
+	do
+	    if [[ $line =~ $re ]]
+	    then
+		local opt="${BASH_REMATCH[2]}" lopt="${BASH_REMATCH[3]}" optarg="${BASH_REMATCH[5]:+:}"
+		[[ $opt ]] && options+="${opt}${optarg}"
+		[[ $lopt ]] && longoptions+="${longoptions:+,}${lopt}${optarg}"
+	    fi
+	done <<<"$(helm "$cmd" --help | sed -e '1,/^Flags:/d')"
+
+	cat >"$optfile" <<EOF
+options_version='$helm_version'
+options='$options'
+longoptions='$longoptions'
+EOF
     fi
-    local options='n:f:'
-    local longoptions='ca-file:,cert-file:,dep-up,devel,dry-run,key-file:,keyring:,name:,name-template:,namespace:,no-hooks,replace,repo:,set:,timeout:,tls,tls-ca-cert:,tls-cert:,tls-key:,tls-verify,values:,verify,version:,wait,debug,home:,kube-context:,tiller-connection-timeout:,tiller-namespace:'
-    local parsed=$(getopt --options=$options --longoptions=$longoptions --name 'helm install' -- "$@")
+    
+    local parsed=$(getopt --options="$options" --longoptions="$longoptions" --name="helm $cmd" -- "$@")
     if [[ $? -ne 0 ]]
     then
 	# e.g. $? == 1
@@ -315,50 +329,52 @@ install_wrapper() {
 	exit 2
     fi
 
-    local -a allargs decfiles=()
-    eval allargs=("$parsed")
-    local i=0 yml ymldec decrypted
-    while [[ $i -lt ${#allargs[@]} ]]
+    # collect cmd options with optional option arguments
+    local -a cmdopts=() decfiles=()
+    local yml ymldec decrypted
+    eval set -- "$parsed"
+    while [[ $# -gt 0 ]]
     do
-	case "${allargs[$i]}" in
+	case "$1" in
+	    --)
+		# skip --, and what remains are the cmd args
+		shift 
+		break
+		;;
             -f|--values)
-		i=$((i+1))
-		yml="${allargs[$i]}"
+		cmdopts+=("$1")
+		yml="$2"
 		if [[ $yml =~ ^(.*/)?secrets(\.[^.]+)\.yaml$ ]]
 		then
 		    decrypt_helper $yml ymldec decrypted
-		    allargs[$i]="$ymldec"
-		    if [[ $decrypted -eq 1 ]]
-		    then
-			decfiles+=( $ymldec )
-		    fi
+		    cmdopts+=("$ymldec")
+		    [[ $decrypted -eq 1 ]] && decfiles+=("$ymldec")
+		else
+		    cmdopts+=("$yml")
 		fi
+		shift # to also skip option arg
 		;;
 	    *)
+		cmdopts+=("$1")
 		;;
 	esac
-	i=$((i+1))
+	shift
     done
 
-    # expecting to find ("--" "chart") at end of parsed args
-    if [[ ${allargs[-2]} != '--' ]]
-    then
-	echo "Expecting chart as argument"
-	exit 4
-    fi
-
-    # re-order args and run helm command
-    local -a args=("${allargs[-1]}")
-    unset allargs[-1]
-    unset allargs[-1]
-    allargs=("${args[@]}" "${allargs[@]}")
-    helm install "${allargs[@]}"
+    # run helm command with args and opts in correct order
+    helm "$cmd" "$@" "${cmdopts[@]}"
 
     # cleanup on-the-fly decrypted files
-    if [[ ${#decfiles[@]} -gt 0 ]]
+    [[ ${#decfiles[@]} -gt 0 ]] && rm -v "${decfiles[@]}"
+}
+
+install_wrapper() {
+    if is_help "$1"
     then
-	rm -v "${decfiles[@]}"
+	install_usage
+	return
     fi
+    helm_wrapper install "$@"
 }
 
 upgrade_wrapper() {
@@ -367,136 +383,84 @@ upgrade_wrapper() {
 	upgrade_usage
 	return
     fi
-    local options='if:'
-    local longoptions='ca-file:,cert-file:,devel,dry-run,install,key-file:,keyring:,namespace:,no-hooks,recreate-pods,repo:,reset-values,reuse-values,set:,timeout:,tls,tls-ca-cert:,tls-cert:,tls-key:,tls-verify,values:,verify,version:,wait,debug,home:,kube-context:,tiller-connection-timeout:,tiller-namespace:'
-    local parsed=$(getopt --options=$options --longoptions=$longoptions --name 'helm upgrade' -- "$@")
-    if [[ $? -ne 0 ]]
-    then
-	# e.g. $? == 1
-	#  then getopt has complained about wrong arguments to stdout
-	exit 2
-    fi
-
-    local -a allargs decfiles=()
-    eval allargs=("$parsed")
-    local i=0 yml ymldec decrypted
-    while [[ $i -lt ${#allargs[@]} ]]
-    do
-	case "${allargs[$i]}" in
-            -f|--values)
-		i=$((i+1))
-		yml="${allargs[$i]}"
-		if [[ $yml =~ ^(.*/)?secrets(\.[^.]+)\.yaml$ ]]
-		then
-		    decrypt_helper $yml ymldec decrypted
-		    allargs[$i]="$ymldec"
-		    if [[ $decrypted -eq 1 ]]
-		    then
-			decfiles+=( $ymldec )
-		    fi
-		fi
-		;;
-	esac
-	i=$((i+1))
-    done
-
-    # expecting to find ("--" "release" "chart") at end of parsed args
-    if [[ ${allargs[-3]} != '--' ]]
-    then
-	echo "Expecting release and chart as arguments"
-	exit 4
-    fi
-
-    # re-order args and run helm command
-    local -a args=("${allargs[-2]}" "${allargs[-1]}")
-    unset allargs[-1]
-    unset allargs[-1]
-    unset allargs[-1]
-    allargs=("${args[@]}" "${allargs[@]}")
-    helm upgrade "${allargs[@]}"
-
-    # cleanup on-the-fly decrypted files
-    if [[ ${#decfiles[@]} -gt 0 ]]
-    then
-	rm -v "${decfiles[@]}"
-    fi
+    helm_wrapper upgrade "$@"
 }
 
-if [[ $# -lt 1 ]]
+if [[ $# -eq 0 ]]
 then
     usage
     exit 1
 fi
 
-case "${1:-"help"}" in
-    "enc"):
-	  if [[ $# -lt 2 ]]
-	  then
-	      enc_usage
-	      echo "Error: Chart package required."
-	      exit 1
-	  fi
-	  enc "$2"
-	  shift
-	  ;;
-    "dec"):
-	  if [[ $# -lt 2 ]]
-	  then
-	      dec_usage
-	      echo "Error: Chart package required."
-	      exit 1
-	  fi
-	  dec "$2"
-	  ;;
-    "clean"):
-	    if [[ $# -lt 2 ]]
-	    then
-		clean_usage
-		echo "Error: Chart package required."
-		exit 1
-	    fi
-	    clean "$2"
-	    ;;
-    "view"):
-	   if [[ $# -lt 2 ]]
-	   then
-	       view_usage
-	       echo "Error: Chart package required."
-	       exit 1
-	   fi
-	   view "$2"
-	   ;;
-    "edit"):
-	   if [[ $# -lt 2 ]]
-	   then
-	       edit_usage
-	       echo "Error: Chart package required."
-	       exit 1
-	   fi
-	   edit "$2"
-	   shift
-	   ;;
-    "install"):
-	      if [[ $# -lt 2 ]]
-	      then
-		  install_usage
-		  echo "Error: helm install parameters required."
-		  exit 1
-	      fi
-	      shift
-	      install_wrapper "$@"
-	      ;;
-    "upgrade"):
-	      if [[ $# -lt 2 ]]
-	      then
-		  upgrade_usage
-		  echo "Error: helm upgrade parameters required."
-		  exit 1
-	      fi
-	      shift
-	      upgrade_wrapper "$@"
-	      ;;
-    "--help"|"help"|"-h")
+case "${1:-help}" in
+    enc)
+	if [[ $# -lt 2 ]]
+	then
+	    enc_usage
+	    echo "Error: Chart package required."
+	    exit 1
+	fi
+	enc "$2"
+	shift
+	;;
+    dec)
+	if [[ $# -lt 2 ]]
+	then
+	    dec_usage
+	    echo "Error: Chart package required."
+	    exit 1
+	fi
+	dec "$2"
+	;;
+    clean)
+	if [[ $# -lt 2 ]]
+	then
+	    clean_usage
+	    echo "Error: Chart package required."
+	    exit 1
+	fi
+	clean "$2"
+	;;
+    view)
+	if [[ $# -lt 2 ]]
+	then
+	    view_usage
+	    echo "Error: Chart package required."
+	    exit 1
+	fi
+	view "$2"
+	;;
+    edit)
+	if [[ $# -lt 2 ]]
+	then
+	    edit_usage
+	    echo "Error: Chart package required."
+	    exit 1
+	fi
+	edit "$2"
+	shift
+	;;
+    install)
+	if [[ $# -lt 2 ]]
+	then
+	    install_usage
+	    echo "Error: helm install parameters required."
+	    exit 1
+	fi
+	shift
+	install_wrapper "$@"
+	;;
+    upgrade)
+	if [[ $# -lt 2 ]]
+	then
+	    upgrade_usage
+	    echo "Error: helm upgrade parameters required."
+	    exit 1
+	fi
+	shift
+	upgrade_wrapper "$@"
+	;;
+    --help|-h|help)
 	usage
 	;;
     *)

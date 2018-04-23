@@ -126,7 +126,7 @@ then
     echo -e "${GREEN}[OK]${NOC} helm-secrets plugin installed"
 else
     "${HELM_CMD}" plugin install "${SECRETS_REPO}" 2>/dev/null
-    echo -e "${RED}[FAIL]${NOC} No helm-secrets plugin aboting"
+    echo -e "${RED}[FAIL]${NOC} No helm-secrets plugin aborting"
     exit 1
 fi
 
