@@ -33,6 +33,7 @@ Available Commands:
   edit   	Edit secrets file and encrypt afterwards
   install	wrapper that decrypts secrets[.*].yaml files before running helm install
   upgrade	wrapper that decrypts secrets[.*].yaml files before running helm upgrade
+  lint		wrapper that decrypts secrets[.*].yaml files before running helm lint
 
 EOF
 }
@@ -149,6 +150,23 @@ Example:
 
 Typical usage:
   $ helm secrets upgrade i1 stable/nginx-ingress -f values.test.yaml -f secrets.test.yaml
+
+EOF
+}
+
+lint_usage() {
+    cat <<EOF
+Run helm lint on a chart
+
+This is a wrapper for the "helm lint" command. It will detect -f and
+--values options, and decrypt any secrets.*.yaml files before running "helm
+lint".
+
+Example:
+  $ helm secrets lint <HELM LINT OPTIONS>
+
+Typical usage:
+  $ helm secrets lint ./my-chart -f values.test.yaml -f secrets.test.yaml
 
 EOF
 }
@@ -368,22 +386,13 @@ EOF
     [[ ${#decfiles[@]} -gt 0 ]] && rm -v "${decfiles[@]}"
 }
 
-install_wrapper() {
-    if is_help "$1"
+helm_command() {
+    if [[ $# -lt 2 ]] || is_help "$2"
     then
-	install_usage
+	eval "${1}_usage"
 	return
     fi
-    helm_wrapper install "$@"
-}
-
-upgrade_wrapper() {
-    if is_help "$1"
-    then
-	upgrade_usage
-	return
-    fi
-    helm_wrapper upgrade "$@"
+    helm_wrapper "$@"
 }
 
 if [[ $# -eq 0 ]]
@@ -440,25 +449,8 @@ case "${1:-help}" in
 	edit "$2"
 	shift
 	;;
-    install)
-	if [[ $# -lt 2 ]]
-	then
-	    install_usage
-	    echo "Error: helm install parameters required."
-	    exit 1
-	fi
-	shift
-	install_wrapper "$@"
-	;;
-    upgrade)
-	if [[ $# -lt 2 ]]
-	then
-	    upgrade_usage
-	    echo "Error: helm upgrade parameters required."
-	    exit 1
-	fi
-	shift
-	upgrade_wrapper "$@"
+    install|upgrade|lint)
+	helm_command "$@"
 	;;
     --help|-h|help)
 	usage
