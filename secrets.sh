@@ -339,13 +339,10 @@ longoptions='$longoptions'
 EOF
     fi
     
-    local parsed=$(getopt --options="$options" --longoptions="$longoptions" --name="helm $cmd" -- "$@")
-    if [[ $? -ne 0 ]]
-    then
-	# e.g. $? == 1
-	#  then getopt has complained about wrong arguments to stdout
-	exit 2
-    fi
+    # parse command line
+    local parsed # separate line, otherwise the return value of getopt is ignored
+    # if parsing fails, getopt returns non-0, and the shell exits due to "set -e"
+    parsed=$(getopt --options="$options" --longoptions="$longoptions" --name="helm $cmd" -- "$@")
 
     # collect cmd options with optional option arguments
     local -a cmdopts=() decfiles=()
@@ -380,6 +377,7 @@ EOF
     done
 
     # run helm command with args and opts in correct order
+    set +e # ignore errors
     helm "$cmd" "$@" "${cmdopts[@]}"
 
     # cleanup on-the-fly decrypted files
