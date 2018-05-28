@@ -327,7 +327,7 @@ clean() {
 }
 
 helm_wrapper() {
-    local cmd="$1"
+    local cmd="$1" subcmd=''
     shift
     if [[ $cmd == diff ]]
     then
