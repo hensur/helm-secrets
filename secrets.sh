@@ -327,20 +327,22 @@ clean() {
 }
 
 helm_wrapper() {
-    local cmd="$1" subcmd=''
+    local cmd="$1" subcmd='' cmd_version=''
     shift
     if [[ $cmd == diff ]]
     then
 	subcmd="$1"
 	shift
+	cmd_version=$(helm diff version)
     fi
 
     # cache options for the helm command in a file so we don't need to parse the help each time
     local helm_version=$(helm version --client --short)
+    local cur_options_version="${helm_version}${cmd_version:+ $cmd: }${cmd_version}"
     local optfile="$HELM_PLUGIN_DIR/helm.${cmd}${subcmd:+.}${subcmd}.options" options_version='' options='' longoptions=''
     [[ -f $optfile ]] && . "$optfile"
 
-    if [[ $helm_version != $options_version ]]
+    if [[ $cur_options_version != $options_version ]]
     then
 	local re='(-([a-zA-Z0-9]), )?--([-_a-zA-Z0-9]+)( ([a-zA-Z0-9]+))?' line
 	options='' longoptions=''
@@ -357,7 +359,7 @@ helm_wrapper() {
 	done <<<"$(helm "$cmd" $subcmd --help | sed -e '1,/^Flags:/d')"
 
 	cat >"$optfile" <<EOF
-options_version='$helm_version'
+options_version='$cur_options_version'
 options='$options'
 longoptions='$longoptions'
 EOF
