@@ -264,7 +264,7 @@ decrypt_helper() {
 	then
 	    echo "$__ymldec is newer than $yml"
 	else
-	    sops -d "$yml" > "$__ymldec"
+	    sops -d "$yml" > "$__ymldec" || { rm "$__ymldec"; false; }
 	    __dec=1
 	fi
     fi
