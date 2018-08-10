@@ -12,6 +12,12 @@ EOF
     exit 1
 fi
 
+REALPATH="realpath"
+
+if [ $(uname) == "Darwin" ] ; then
+    REALPATH="grealpath"
+fi
+
 set -ueo pipefail
 
 usage() {
@@ -31,6 +37,7 @@ Available Commands:
   view   	Print secrets decrypted
   edit   	Edit secrets file and encrypt afterwards
   clean         Clean all Decrypted files in specified directory
+  deploy        wrapper that searches for values and secrets from a leaf directory
   install	wrapper that decrypts secrets[.*].yaml files before running helm install
   upgrade	wrapper that decrypts secrets[.*].yaml files before running helm upgrade
   lint		wrapper that decrypts secrets[.*].yaml files before running helm lint
@@ -190,6 +197,23 @@ Typical usage:
 EOF
 }
 
+deploy_usage() {
+    cat <<EOF
+Easily deploy a helm_vars leaf directory.
+This wrapper collects all values.yaml and secrets.yaml files
+until it reaches the current directory. This makes it easy to deploy to a specific
+environment without a huge helm command line.
+
+
+Usage:
+  $ helm secrets deploy [install|upgrade] <project>/helm_vars/<type>/<dev|prod>
+
+Typical usage:
+  $ helm secrets deploy upgrade proxy/helm_vars/prometheus/dev
+
+EOF
+}
+
 is_help() {
     case "$1" in
 	-h|--help|help)
@@ -202,24 +226,42 @@ is_help() {
 }
 
 sops_config() {
-    #HELM_HOME=$(helm home)
     DEC_SUFFIX=".dec.yaml"
-    SOPS_CONF_FILE=".sops.yaml"
+}
+
+is_enc() {
+    # check if a file is already encrypted
+    if [[ $(grep -C10000 'sops:' "$1" | grep -c 'version:') -gt 0 ]]
+    then
+	return 0
+    fi
+    return 1
+}
+
+get_dec() {
+    sops_config
+    echo "$(sed -e "s/\\.yaml$/${DEC_SUFFIX}/" <<<"$1")"
 }
 
 encrypt_helper() {
-    local dir=$(dirname "$1")
-    local yml=$(basename "$1")
-    cd "$dir"
-    [[ -e "$yml" ]] || { echo "File does not exist: $dir/$yml"; exit 1; }
-    sops_config
-    local ymldec=$(sed -e "s/\\.yaml$/${DEC_SUFFIX}/" <<<"$yml")
+    local yml="$1"
+    [[ -e "$yml" ]] || { echo "File does not exist: $yml"; exit 1; }
+    local ymldec=$(get_dec "$yml")
     [[ -e $ymldec ]] || ymldec="$yml"
     
-    if [[ $(grep -C10000 'sops:' "$ymldec" | grep -c 'version:') -gt 0 ]]
+    if [[ $(is_enc $ymldec) ]]
     then
 	echo "Already encrypted: $ymldec"
-	return
+        return 0
+    fi
+
+    if [[ $yml =~ secrets.*\.dec\.yaml$ ]]
+    then
+        echo "Not a secrets file."
+        echo "To encrypt the secrets.yaml again, just use
+helm secrets enc ${yml%%.*}.yaml
+This file will be encrypted instead."
+        return 1
     fi
     if [[ $yml == $ymldec ]]
     then
@@ -264,13 +306,12 @@ decrypt_helper() {
 
     __dec=0
     [[ -e "$yml" ]] || { echo "File does not exist: $yml"; exit 1; }
-    if [[ $(grep -C10000 'sops:' "$yml" | grep -c 'version:') -eq 0 ]]
+    if [[ $(is_enc $yml) ]]
     then
 	echo "Not encrypted: $yml"
 	__ymldec="$yml"
     else
-	sops_config
-	__ymldec=$(sed -e "s/\\.yaml$/${DEC_SUFFIX}/" <<<"$yml")
+        __ymldec=$(get_dec "$yml")
 	if [[ -e $__ymldec && $__ymldec -nt $yml ]]
 	then
 	    echo "$__ymldec is newer than $yml"
@@ -344,6 +385,85 @@ clean() {
     find "$basedir" -type f -name "*${DEC_SUFFIX}" -print0 | xargs -r0 rm -v
 }
 
+
+get_parent() {
+    dirname "$1"
+}
+
+build_value_list() {
+    # find values.yaml and secrets.yaml recursively
+    local current_dir="$1"
+    local max_dir="$PWD"
+    local my_files=()
+    
+    if [[ "$($REALPATH "$current_dir")" == "$max_dir" ]]; then
+        return
+    fi
+
+    if [[ -f "$current_dir/values.yaml" ]]; then
+        my_files+=("$current_dir/values.yaml")
+    fi
+
+    if [[ -f "$current_dir/secrets.yaml" ]]; then
+        my_files+=("$current_dir/secrets.yaml")
+    fi
+
+    eval $(build_value_list "$(get_parent "$current_dir")")
+    helm_files+=("${my_files[@]}")
+    declare -p helm_files
+}
+
+deploy_helper() {
+    local mode="$1"
+    local project="$2"
+    local project_name="$(echo "$project" | cut -d"/" -f 1)"
+
+    if ! [[ $mode =~ [install|upgrade] ]]
+    then
+        echo "$mode is not supported"
+        return 1
+    fi
+
+    if [[ ! -d "$project" ]]; then
+        echo "$project does not exist."
+        return 1
+    fi
+
+    subdir_count=$(find "$project" -maxdepth 1 -type d | wc -l)
+
+    if [[ ! $subdir_count -eq 1 ]]; then
+        echo "$project has subdirectories."
+        exit 1
+    fi
+
+    eval "$(build_value_list $project)"
+
+    local helm_cmd=("$mode")
+
+    for f in "${helm_files[@]}"; do
+        helm_cmd+=("-f" "$f")
+    done
+        
+    if [[ $mode == "install" ]]; then
+        # -n release and directory
+        helm_cmd+=("-n" "$project_name" "$project_name/")
+    else
+        # release and directory
+        helm_cmd+=("$project_name" "$project_name/")
+    fi
+
+    helm_wrapper "${helm_cmd[@]}"
+}
+
+deploy() {
+    if is_help "$1"
+    then
+	deploy_usage
+	return
+    fi
+    deploy_helper "$@"
+}
+
 helm_wrapper() {
     local cmd="$1" subcmd='' cmd_version=''
     shift
@@ -403,9 +523,9 @@ EOF
             -f|--values)
 		cmdopts+=("$1")
 		yml="$2"
-		if [[ $yml =~ ^(.*/)?secrets(\.[^.]+)\.yaml$ ]]
+		if [[ $yml =~ ^(.*/)?secrets.*\.yaml$ ]]
 		then
-		    decrypt_helper $yml ymldec decrypted
+		    decrypt_helper "$yml" ymldec decrypted
 		    cmdopts+=("$ymldec")
 		    [[ $decrypted -eq 1 ]] && decfiles+=("$ymldec")
 		else
@@ -422,7 +542,13 @@ EOF
 
     # run helm command with args and opts in correct order
     set +e # ignore errors
-    helm "$cmd" $subcmd "$@" "${cmdopts[@]}"
+    echo "executing: helm $cmd $subcmd" "$@" "${cmdopts[@]}"
+    read -p "Are you sure? " -n 1 -r
+
+    if [[ $REPLY =~ ^[Yy]$ ]]
+    then
+        helm "$cmd" "$subcmd" "$@" "${cmdopts[@]}"
+    fi
 
     # cleanup on-the-fly decrypted files
     [[ ${#decfiles[@]} -gt 0 ]] && rm -v "${decfiles[@]}"
@@ -485,6 +611,16 @@ case "${1:-help}" in
 	fi
 	clean "$2"
 	;;
+    deploy)
+        if [[ $# -lt 3 ]]
+        then
+            deploy_usage
+            echo "Error: helm_vars path required."
+            exit 1
+        fi
+        shift
+        deploy $@
+        ;;
     install|upgrade|lint|diff)
 	helm_command "$@"
 	;;
